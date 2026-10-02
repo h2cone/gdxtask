@@ -25,3 +25,9 @@ pub mod export;
 
 #[cfg(feature = "run-export")]
 pub mod run;
+
+#[cfg(feature = "files")]
+pub mod files;
+
+#[cfg(feature = "isolation")]
+pub mod isolation;

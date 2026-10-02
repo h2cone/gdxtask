@@ -12,7 +12,11 @@ use std::{fs, path::PathBuf};
 pub struct ExportArgs {
     #[cfg_attr(feature = "cli", arg(long, value_enum, default_value_t = ExportTarget::Windows))]
     pub target: ExportTarget,
-    #[cfg_attr(feature = "cli", arg(long, default_value = "godot"))]
+    /// Executable path/name. Empty uses GODOT4_BIN/GODOT_BIN, then PATH.
+    #[cfg_attr(
+        feature = "cli",
+        arg(long, default_value = "", hide_default_value = true)
+    )]
     pub godot_exe: String,
     #[cfg_attr(feature = "cli", arg(long, default_value = "Windows Desktop"))]
     pub preset_name: String,

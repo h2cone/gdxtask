@@ -10,8 +10,10 @@ publish = false
 [features]
 default = ["process"]
 process = []
+files = ["dep:windows-sys"]
+isolation = []
 cli = ["dep:clap"]
-godot = ["dep:serde_json"]
+godot = ["process", "dep:serde_json", "dep:which"]
 addons = ["godot", "dep:serde_json", "dep:ureq", "dep:zip"]
 gdext = ["process", "dep:serde_json", "dep:toml_edit", "dep:ureq"]
 run-export = ["process", "godot", "cli"]
@@ -24,7 +26,11 @@ tempfile = "3"
 toml_edit = { version = "0.22", optional = true }
 ureq = { version = "2", features = ["json"], optional = true }
 zip = { version = "2", optional = true }
+which = { version = "8", optional = true }
 
 [[example]]
 name = "full"
 required-features = ["cli", "addons", "gdext", "run-export"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

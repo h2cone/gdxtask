@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +65,19 @@ pub fn run(program: impl Into<Program>, cwd: &Path, args: &[String]) -> Result<(
     }
 }
 
+/// Validate an exit status while retaining both output streams in diagnostics.
+pub fn ensure_success(output: &Output, label: &str) -> Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
 /// Run a program and capture stdout, including stderr in errors.
 pub fn capture_stdout(program: impl Into<Program>, cwd: &Path, args: &[&str]) -> Result<String> {
     let program = program.into();
@@ -76,15 +89,10 @@ pub fn capture_stdout(program: impl Into<Program>, cwd: &Path, args: &[&str]) ->
         .output()
         .with_context(|| format!("failed to start {}", program.path().display()))?;
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "{} {} failed with status {}\nstderr:\n{}",
-            program.path().display(),
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    ensure_success(
+        &output,
+        &format!("{} {}", program.path().display(), args.join(" ")),
+    )?;
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
