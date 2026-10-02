@@ -1,6 +1,14 @@
+mod output;
+mod script;
+
+pub use output::OutputPolicy;
+pub use script::{ScriptOptions, run_script, script_command};
+
 use anyhow::{Context, Result};
 use std::{
-    env, fs,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -51,71 +59,153 @@ pub fn import_needed(godot_dir: &Path) -> bool {
     }
 }
 
-/// Resolve a Godot executable, preferring the Windows console sibling when it is present.
+/// Resolve an explicitly requested executable. An empty string selects the
+/// standard environment/PATH search. Nonempty values always take precedence.
 pub fn resolve_godot_executable(requested: &str) -> Result<PathBuf> {
-    let resolved = resolve_command(requested)?;
-    if !cfg!(windows) {
-        return Ok(resolved);
-    }
-
-    let dir = resolved.parent().unwrap_or_else(|| Path::new(""));
-    let stem = resolved
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or(requested);
-    let ext = resolved
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-
-    if stem.to_ascii_lowercase().ends_with("_console") {
-        return Ok(resolved);
-    }
-
-    let sibling = if ext.is_empty() {
-        dir.join(format!("{stem}_console"))
-    } else {
-        dir.join(format!("{stem}_console.{ext}"))
-    };
-
-    if sibling.is_file() {
-        Ok(sibling)
-    } else {
-        Ok(resolved)
-    }
+    find_godot((!requested.is_empty()).then(|| Path::new(requested)))
 }
 
-/// Resolve a command from an absolute/relative path or from PATH.
+/// Search explicit path/name, GODOT4_BIN, GODOT_BIN, then godot4/godot on PATH.
+/// A configured but invalid executable fails instead of silently falling back.
+/// Windows uses an existing `_console` sibling to retain diagnostic output.
+pub fn find_godot(explicit: Option<&Path>) -> Result<PathBuf> {
+    find_godot_with(explicit, |name| env::var_os(name), resolve_os_command)
+}
+
+fn find_godot_with(
+    explicit: Option<&Path>,
+    mut environment: impl FnMut(&str) -> Option<OsString>,
+    mut resolve: impl FnMut(&OsStr) -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    let configured = explicit
+        .map(|path| path.as_os_str().to_owned())
+        .or_else(|| environment("GODOT4_BIN"))
+        .or_else(|| environment("GODOT_BIN"));
+    let resolved = if let Some(command) = configured {
+        resolve(&command)?
+    } else {
+        ["godot4", "godot"].into_iter()
+            .find_map(|name| resolve(OsStr::new(name)).ok())
+            .context("Godot was not found; pass --godot-exe, set GODOT4_BIN/GODOT_BIN, or add godot4/godot to PATH")?
+    };
+    Ok(prefer_console(resolved))
+}
+
+fn prefer_console(resolved: PathBuf) -> PathBuf {
+    if !cfg!(windows) {
+        return resolved;
+    }
+    let dir = resolved.parent().unwrap_or_else(|| Path::new(""));
+    let Some(stem) = resolved.file_stem() else {
+        return resolved;
+    };
+    if stem
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .ends_with("_console")
+    {
+        return resolved;
+    }
+    let mut name = stem.to_os_string();
+    name.push("_console");
+    if let Some(extension) = resolved.extension() {
+        name.push(".");
+        name.push(extension);
+    }
+    let sibling = dir.join(name);
+    if sibling.is_file() { sibling } else { resolved }
+}
+
+/// Resolve a command from a path or PATH, including executable/PATHEXT checks
+/// for bare command names. Returned paths are absolute so changing cwd is safe.
 pub fn resolve_command(command: &str) -> Result<PathBuf> {
+    resolve_os_command(OsStr::new(command))
+}
+
+fn resolve_os_command(command: &OsStr) -> Result<PathBuf> {
     let path = Path::new(command);
     if path.components().count() > 1 || path.is_absolute() {
-        if path.exists() {
-            return Ok(path.to_path_buf());
-        }
-        anyhow::bail!("command not found: {command}");
+        anyhow::ensure!(path.is_file(), "command not found: {}", path.display());
+        return std::path::absolute(path).context("make executable path absolute");
     }
-
-    let path_var = env::var_os("PATH").context("PATH is not set")?;
-    for dir in env::split_paths(&path_var) {
-        let candidate = dir.join(command);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-        if cfg!(windows) {
-            let exe = dir.join(format!("{command}.exe"));
-            if exe.is_file() {
-                return Ok(exe);
-            }
-        }
-    }
-
-    anyhow::bail!("command not found: {command}")
+    which::which(command).with_context(|| format!("command not found: {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn executable_search_preserves_precedence_without_mutating_environment() {
+        let explicit = Path::new("explicit-godot");
+        let mut calls = Vec::new();
+        let found = find_godot_with(
+            Some(explicit),
+            |_| panic!("explicit must bypass environment"),
+            |name| {
+                calls.push(name.to_owned());
+                Ok(PathBuf::from(name))
+            },
+        )
+        .unwrap();
+        assert_eq!(found, explicit);
+        assert_eq!(calls, [OsString::from("explicit-godot")]);
+
+        for (first, second, expected) in [
+            (Some("godot-four"), Some("godot-old"), "godot-four"),
+            (None, Some("godot-old"), "godot-old"),
+            (None, None, "godot4"),
+        ] {
+            let found = find_godot_with(
+                None,
+                |key| match key {
+                    "GODOT4_BIN" => first.map(OsString::from),
+                    "GODOT_BIN" => second.map(OsString::from),
+                    _ => unreachable!(),
+                },
+                |name| Ok(PathBuf::from(name)),
+            )
+            .unwrap();
+            assert_eq!(found, Path::new(expected));
+        }
+    }
+
+    #[test]
+    fn invalid_configuration_is_not_hidden_by_path_fallback() {
+        let mut calls = Vec::new();
+        let result = find_godot_with(
+            None,
+            |_| Some("missing".into()),
+            |name| {
+                calls.push(name.to_owned());
+                anyhow::bail!("not found")
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, [OsString::from("missing")]);
+        let found = find_godot_with(
+            None,
+            |_| None,
+            |name| {
+                if name == "godot4" {
+                    anyhow::bail!("not found");
+                }
+                Ok(PathBuf::from(name))
+            },
+        )
+        .unwrap();
+        assert_eq!(found, Path::new("godot"));
+    }
+
+    #[test]
+    fn executable_paths_reject_directories_and_are_absolute() {
+        let temp = TempDir::new().unwrap();
+        assert!(resolve_godot_executable(temp.path().to_str().unwrap()).is_err());
+        let executable = temp.path().join("custom-godot");
+        fs::write(&executable, "").unwrap();
+        assert!(find_godot(Some(&executable)).unwrap().is_absolute());
+    }
 
     #[test]
     fn normalize_keeps_existing_res_paths_and_adds_default() {
